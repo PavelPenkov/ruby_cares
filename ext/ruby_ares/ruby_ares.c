@@ -7,14 +7,14 @@
 #include <sys/select.h>
 #include <netdb.h>
 
+struct resolve_result {
+  VALUE result;
+  int status;
+};
+
 static VALUE ruby_ares_module() {
   return rb_const_get(rb_cObject, rb_intern("Ares"));
 }
-
-struct resolve_result {
-  int result;
-  struct hostent *hostent;
-} result;
 
 void hostent_to_array(VALUE ary, struct hostent *hostent) {
   VALUE official_hostname = rb_str_new2(hostent->h_name);
@@ -43,7 +43,6 @@ void hostent_to_array(VALUE ary, struct hostent *hostent) {
 static VALUE translate_resolve_status(int status) {
   VALUE e;
   VALUE ares = ruby_ares_module();
-  printf("Resolve status %d", status);
   switch(status) {
     case ARES_ENOTIMP:
       e = rb_const_get(ares, rb_intern("NotImplemented"));
@@ -64,19 +63,18 @@ static VALUE translate_resolve_status(int status) {
       e = rb_const_get(ares, rb_intern("Destruction"));
       break;
     default:
-      e = rb_eStandardError;
+      e = rb_const_get(ares, rb_intern("ResolveError"));
   }
   return e;
 }
 
 
 void callback(void *arg, int status, int timeouts, struct hostent *hostent) {
-  if (status != ARES_SUCCESS) {
-    VALUE e = translate_resolve_status(status);
-    rb_raise(e, "%s", "");
+  struct resolve_result *res = arg;
+  res->status = status;
+  if (status == ARES_SUCCESS) {
+    hostent_to_array(res->result, hostent);
   }
-  VALUE res = (VALUE) arg;
-  hostent_to_array(res, hostent);
 }
 
 static VALUE translate_init_error(int err) {
@@ -92,7 +90,8 @@ static VALUE translate_init_error(int err) {
       e = rb_const_get(ruby_ares_module(), rb_intern("NotInitialized"));
       break;
     default:
-      e = rb_eStandardError;
+      e = rb_const_get(ruby_ares_module(), rb_intern("InitializeError"));
+      break;
   }
   return e;
 }
@@ -120,11 +119,12 @@ static VALUE ruby_ares_gethostbyname(int argc, VALUE *argv, VALUE self) {
     rb_raise(e, "%s", "");
   }
 
-  VALUE result = rb_ary_new();
+  struct resolve_result res;
+  res.result = rb_ary_new();
 
   char *hostname = StringValueCStr(host_name);
 
-  ares_gethostbyname(channel, hostname, AF_INET6, &callback, (void*) result);
+  ares_gethostbyname(channel, hostname, AF_INET, &callback, (void*) &res);
 
   int nfds, count;
   fd_set readers, writers;
@@ -142,7 +142,12 @@ static VALUE ruby_ares_gethostbyname(int argc, VALUE *argv, VALUE self) {
 
   ares_destroy(channel);
 
-  return result;
+  if(res.status != ARES_SUCCESS) {
+    VALUE e = translate_resolve_status(res.status);
+    rb_raise(e, "%s", "");
+  }
+
+  return res.result;
 }
 
 void Init_ruby_ares() {
